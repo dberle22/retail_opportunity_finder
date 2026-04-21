@@ -147,9 +147,9 @@ CREATE TABLE IF NOT EXISTS rof_gold.cluster_zone_geometries (
 CREATE TABLE IF NOT EXISTS rof_gold.contiguity_zone_summary (
     market_key              VARCHAR,
     cbsa_code               VARCHAR,
-    cluster_id              VARCHAR,
-    cluster_label           VARCHAR,
-    cluster_order           INTEGER,
+    zone_id                 VARCHAR,
+    zone_label              VARCHAR,
+    zone_order              INTEGER,
     tracts                  INTEGER,
     total_population        DOUBLE,
     pop_growth_3yr_wtd      DOUBLE,
@@ -159,21 +159,21 @@ CREATE TABLE IF NOT EXISTS rof_gold.contiguity_zone_summary (
     mean_tract_score        DOUBLE,
     zone_area_sq_mi         DOUBLE,
     zone_method             VARCHAR,
-    PRIMARY KEY (market_key, cluster_id)
+    PRIMARY KEY (market_key, zone_id)
 );
 
 CREATE TABLE IF NOT EXISTS rof_gold.contiguity_zone_geometries (
     market_key      VARCHAR,
     cbsa_code       VARCHAR,
-    cluster_id      VARCHAR,
-    cluster_label   VARCHAR,
-    cluster_order   INTEGER,
+    zone_id         VARCHAR,
+    zone_label      VARCHAR,
+    zone_order      INTEGER,
     zone_area_sq_mi DOUBLE,
     label_lon       DOUBLE,
     label_lat       DOUBLE,
     geom_wkt        VARCHAR,
     zone_method     VARCHAR,
-    PRIMARY KEY (market_key, cluster_id)
+    PRIMARY KEY (market_key, zone_id)
 );
 
 -- ── Parcel tables ───────────────────────────────────────────────────────────
@@ -218,7 +218,6 @@ CREATE TABLE IF NOT EXISTS rof_gold.parcel_shortlist (
     zone_system                     VARCHAR,
     zone_id                         VARCHAR,
     zone_label                      VARCHAR,
-    zone_order                      INTEGER,
     shortlist_rank_system           BIGINT,
     shortlist_rank_zone             BIGINT,
     parcel_uid                      VARCHAR,
