@@ -293,19 +293,6 @@ Each app surface is a separate Streamlit entry point — deploy them individuall
 
 ---
 
-## Adding More Markets (Post-MVP)
-
-To add Orlando or Gainesville:
-
-1. Add the market to `config/settings.yaml` under `markets:`
-2. Re-run the export pipeline with `--market orlando_fl`
-3. Re-run the geometry pipeline for the new market's counties
-4. The apps read `market_key` from config — they'll pick up the new market automatically
-
-Both Orlando and Gainesville already exist in `serving.parcel_shortlist` in `metro_deep_dive.duckdb`, so the export step is the main gate.
-
----
-
 ## Known Gaps / Future Work
 
 | Item | Notes |
@@ -314,4 +301,180 @@ Both Orlando and Gainesville already exist in `serving.parcel_shortlist` in `met
 | POI overlay | No POI/anchor data in current DuckDB; would need a separate ingest (Google Places or curated lists) |
 | Parcel ingest speed | `ingest_parcel_geom.py` takes ~2 min for 15k parcels due to per-row CRS reprojection; batch with GeoPandas for a 10x speedup |
 | Port R zone build to Python | Zone construction is currently R-based; plan to port after frontend is stable |
-| Expand to GA, NC, SC markets | Requires upstream ACS tract coverage expansion in metro_deep_dive |
+| Zone Explorer tooltips | Cluster Zone and Contiguity Zone tooltips are broken — needs investigation |
+| Baker County parcels | Baker County is missing all parcel geometry — needs investigation |
+
+---
+
+---
+
+# Expansion Plan (Post-MVP)
+
+## Target Markets
+
+7 Southeast US markets are in scope. Tract-level analytical data (`metro_deep_dive.duckdb`) exists for all of them. Parcel data availability varies:
+
+| Market | State | Tract Data | Parcel Data | Status |
+|---|---|---|---|---|
+| Jacksonville | FL | ✅ | ✅ | Live MVP |
+| Orlando | FL | ✅ | ✅ in metro_deep_dive | Pipeline only |
+| Gainesville | FL | ✅ | ✅ in metro_deep_dive | Pipeline only |
+| Wilmington | NC | ✅ | ❌ | Source + pipeline needed |
+| Savannah | GA | ✅ | ❌ | Source + pipeline needed |
+| Raleigh | NC | ✅ | ❌ | Source + pipeline needed |
+| Greenville | SC | ✅ | ❌ | Source + pipeline needed |
+
+---
+
+## Stream 1 — Cloud Infrastructure
+
+**Priority: Do first. Unlocks the architecture for all other streams.**
+
+The current approach (one committed `.duckdb` file per market) doesn't scale past 2–3 markets. The goal is to move to a cloud database that all Streamlit apps query directly.
+
+### Recommended: MotherDuck
+
+MotherDuck is a managed DuckDB cloud service with a free tier. It is DuckDB-native, so existing SQL and pipeline code changes minimally (connection string swap). All markets live in one database. The app queries it directly — no file downloads on startup.
+
+Alternative considered: host a single multi-market `.duckdb` on **Hugging Face Datasets** (free, large file support). Simpler but requires downloading the full file (~500MB+ at 7 markets) on every cold start and a rebuild/reupload cycle for any data update.
+
+| | MotherDuck | Hugging Face file |
+|---|---|---|
+| Cost | Free tier, then ~$50/mo | Free |
+| Code change | Connection string swap | Download + cache logic |
+| Data updates | Write to DB, instant | Rebuild file, reupload |
+| Cold start | Fast (query only) | Slow (~500MB download) |
+| Scalability | High | Medium |
+
+### Architecture After Migration
+
+```
+metro_deep_dive.duckdb  ──export──►  MotherDuck (rof_gold schema, all markets)
+parcel_geom/{state}/*.parquet ──ingest──►  MotherDuck
+                                               │
+                                     Streamlit apps (cloud + local)
+```
+
+Local dev keeps `data/processed/rof_app.duckdb` as a fallback. Cloud apps connect to MotherDuck via secrets.
+
+### Waves
+
+**Wave 1A — Evaluate and set up**
+- Create MotherDuck account, evaluate free tier limits against projected data size
+- Confirm ~105k parcels × 7 markets fits comfortably in free tier
+- Decision gate: proceed with MotherDuck or fall back to Hugging Face file approach
+
+**Wave 1B — Migrate Jacksonville**
+- Update `config.py` connection logic to support a MotherDuck connection string
+- Update `export_from_metro.py` and `ingest_parcel_geom.py` to write to MotherDuck (in addition to local DuckDB)
+- Migrate Jacksonville data to MotherDuck
+- Add MotherDuck token to Streamlit Community Cloud secrets
+- Redeploy Jacksonville apps against MotherDuck — confirm parity with current behavior
+
+**Wave 1C — Establish multi-market schema**
+- Add `market_key` partitioning to all `rof_gold` tables (already in schema for most tables; audit and confirm)
+- Confirm `user_shortlist` is keyed per user + market so shortlist data from different markets doesn't collide
+
+---
+
+## Stream 2 — Add FL Markets (Orlando & Gainesville)
+
+**Priority: Do second. Data is ready — just pipeline runs.**
+
+Both markets already exist in `serving.parcel_shortlist` in `metro_deep_dive.duckdb`. The county parcel geometry files (`.rds`) need to be confirmed available locally.
+
+### Waves
+
+**Wave 2A — Config and pipeline**
+- Add `orlando_fl` and `gainesville_fl` to `config/settings.yaml` with county GEOIDs and map centers
+- Run `export_from_metro.py` for each market
+- Run `export_parcel_geometry.R` for each market's counties
+- Run `ingest_parcel_geom.py` for each market
+- Write both markets to MotherDuck
+
+**Wave 2B — Deploy**
+- Deploy Zone Explorer and Parcel Explorer for Orlando on Streamlit Community Cloud
+- Deploy Zone Explorer and Parcel Explorer for Gainesville on Streamlit Community Cloud
+- Smoke test both markets — geometry, scores, shortlist
+
+---
+
+## Stream 3 — Market Selection UI
+
+**Priority: Do third, in parallel with or just after Stream 2.**
+
+### Waves
+
+**Wave 3A — Market selector in Zone Explorer (short term)**
+- Add market dropdown to Zone Explorer sidebar, populated from `config/settings.yaml`
+- Update `load_tract_data()`, `load_zone_data()` to accept `market_key`
+- Update map center on market change
+- Add `?market=orlando_fl` URL param persistence so links are shareable
+
+**Wave 3B — Market selector in Parcel Explorer (short term)**
+- Add same market dropdown to Parcel Explorer sidebar
+- This is a bridge step — allows the app to work across markets before the full market-agnostic view is built
+
+**Wave 3C — Market-agnostic Parcel Explorer (medium term)**
+- Parcel Explorer loads all markets' parcels simultaneously
+- Map defaults to Southeast US bounding box
+- At low zoom: show cluster/dot layer (one dot per zone centroid, sized by parcel count) — avoids rendering 105k polygons
+- At high zoom (city level): switch to polygon layer for visible viewport
+- Requires either PyDeck viewport callbacks or a pre-aggregated cluster table in MotherDuck
+- Sidebar county/zone filters become cross-market (state → market → county hierarchy)
+
+**Wave 3D — Unified single app (long term)**
+- Merge Zone Explorer and Parcel Explorer into one multi-page Streamlit app
+- Single deployment URL
+- Market selection persists across pages via session state + URL params
+
+---
+
+## Stream 4 — GA, SC, NC Markets
+
+**Priority: Do last. Requires sourcing parcel data and building new state pipelines.**
+
+Tract-level data already exists in `metro_deep_dive.duckdb` for all four markets. The gap is parcel geometry and tabular parcel attributes.
+
+### Parcel Data Sources (to investigate)
+
+| State | Likely Source | Notes |
+|---|---|---|
+| NC | NC OneMap statewide parcel layer | Statewide file, likely cleanest path |
+| GA | County GIS portals (Chatham Co. for Savannah) | No statewide aggregator — county by county |
+| SC | SC Revenue and Fiscal Affairs Office | Publishes statewide parcel data |
+
+### Waves
+
+**Wave 4A — Source research**
+- Download and inspect sample data from NC OneMap, SC RFA, and Chatham County GIS
+- Assess field availability: parcel ID, land use code, assessed value, sale date/price, geometry
+- Map fields to the existing FL FDOR normalized schema
+- Identify gaps (fields present in FL but missing in other states)
+- Decision: can we reuse the existing R normalization script with state-specific configs, or do we need separate pipelines per state?
+
+**Wave 4B — Build state pipelines**
+- Write R normalization scripts for NC, GA, SC (modeled on `export_parcel_geometry.R`)
+- Write Python ingest scripts (modeled on `ingest_parcel_geom.py`) or extend the existing one with a `--state` flag
+- Test on one county per state before running all markets
+
+**Wave 4C — Run pipelines and deploy**
+- Add all four markets to `config/settings.yaml`
+- Run export + geometry pipelines for each market
+- Write to MotherDuck
+- Deploy Streamlit apps (or update unified app if Wave 3D is complete)
+- QA each market: geometry coverage, score coverage, zone build
+
+---
+
+## Deployment Strategy
+
+**Current:** One `.duckdb` file per market committed to GitHub, separate Streamlit app per surface per market.
+
+**Near term (after Stream 1–2):** All markets in MotherDuck, separate Streamlit deployments per market, each surface (Zone Explorer, Parcel Explorer) deployed independently.
+
+**Medium term (after Stream 3B):** Single Streamlit deployment per surface, market selector in sidebar.
+
+**Long term (after Stream 3D):** One unified multi-page Streamlit app, one deployment URL.
+
+Streamlit Community Cloud remains the target for as long as it can support the data volume and traffic. Move to Render or Railway only if Community Cloud limits become a constraint (e.g., memory ceiling with 7 markets loaded).
