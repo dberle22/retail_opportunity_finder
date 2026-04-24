@@ -1,5 +1,13 @@
 """Retail Parcel Explorer — Surface 2: parcel candidate browser with scoring."""
 
+from pathlib import Path
+import sys
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_SRC_PATH = _REPO_ROOT / "src"
+if str(_SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(_SRC_PATH))
+
 import pandas as pd
 import pydeck as pdk
 import streamlit as st

@@ -1,6 +1,12 @@
 """Data QA App — Surface 3: coverage and data health dashboard."""
 
 from pathlib import Path
+import sys
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_SRC_PATH = _REPO_ROOT / "src"
+if str(_SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(_SRC_PATH))
 
 import duckdb
 import pandas as pd
