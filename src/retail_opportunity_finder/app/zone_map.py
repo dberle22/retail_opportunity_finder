@@ -72,6 +72,9 @@ def load_zone_data(con, market_key: str, zone_system: str) -> pd.DataFrame:
                 czs.tracts,
                 czs.total_population,
                 czs.pop_growth_3yr_wtd,
+                czs.pop_density_median,
+                czs.units_per_1k_3yr_wtd,
+                czs.price_proxy_pctl_median,
                 czs.mean_tract_score
             FROM rof_gold.cluster_zone_geometries czg
             LEFT JOIN rof_gold.cluster_zone_summary czs
@@ -94,6 +97,9 @@ def load_zone_data(con, market_key: str, zone_system: str) -> pd.DataFrame:
                 czs.tracts,
                 czs.total_population,
                 czs.pop_growth_3yr_wtd,
+                czs.pop_density_median,
+                czs.units_per_1k_3yr_wtd,
+                czs.price_proxy_pctl_median,
                 czs.mean_tract_score
             FROM rof_gold.contiguity_zone_geometries czg
             LEFT JOIN rof_gold.contiguity_zone_summary czs
@@ -103,6 +109,47 @@ def load_zone_data(con, market_key: str, zone_system: str) -> pd.DataFrame:
             """,
             [market_key],
         ).df()
+
+
+def load_cluster_tract_data(con, market_key: str) -> pd.DataFrame:
+    """Returns tract metrics joined to their cluster assignment for a market."""
+    return con.execute(
+        """
+        SELECT
+            ca.cluster_id    AS zone_id,
+            ca.cluster_label AS zone_label,
+            ca.cluster_order AS zone_order,
+            ca.tract_geoid,
+            tf.county_geoid,
+            tf.pop_total,
+            tf.pop_growth_3yr,
+            tf.median_hh_income,
+            tf.per_capita_income,
+            tf.pov_rate,
+            tf.median_gross_rent,
+            tf.median_home_value,
+            tf.pop_density,
+            tf.units_per_1k_3yr,
+            ts.tract_score,
+            ts.eligible_v1,
+            ts.gate_pop,
+            ts.gate_price,
+            ts.gate_density,
+            ri.retail_parcel_count,
+            ri.retail_area_density,
+            ri.local_retail_context_score
+        FROM rof_gold.cluster_assignments ca
+        LEFT JOIN rof_gold.tract_features tf
+            ON ca.cbsa_code = tf.cbsa_code AND ca.tract_geoid = tf.tract_geoid
+        LEFT JOIN rof_gold.tract_scores ts
+            ON ca.cbsa_code = ts.cbsa_code AND ca.tract_geoid = ts.tract_geoid
+        LEFT JOIN rof_gold.retail_intensity_by_tract ri
+            ON ca.cbsa_code = ri.cbsa_code AND ca.tract_geoid = ri.tract_geoid
+        WHERE ca.market_key = ?
+        ORDER BY ca.cluster_order, ca.tract_geoid
+        """,
+        [market_key],
+    ).df()
 
 
 def build_metric_options() -> OrderedDict[str, str]:
@@ -158,7 +205,7 @@ def apply_color_ramp(df: pd.DataFrame, metric_col: str) -> pd.DataFrame:
     return df
 
 
-def build_tract_layer(df: pd.DataFrame) -> pdk.Layer:
+def build_tract_layer(df: pd.DataFrame, pickable: bool = True) -> pdk.Layer:
     """Builds a PyDeck PolygonLayer for census tracts colored by fill_color."""
     df = add_polygon_coords(df)
     df = df[df["polygon_coords"].notna()].copy()
@@ -170,13 +217,13 @@ def build_tract_layer(df: pd.DataFrame) -> pdk.Layer:
         get_fill_color="fill_color",
         get_line_color=[100, 100, 100, 100],
         line_width_min_pixels=0.5,
-        pickable=True,
+        pickable=pickable,
         auto_highlight=True,
         opacity=1.0,
     )
 
 
-def build_zone_layer(df: pd.DataFrame) -> pdk.Layer:
+def build_zone_layer(df: pd.DataFrame, pickable: bool = True) -> pdk.Layer:
     """Builds a PyDeck PolygonLayer for zone boundaries (outline only)."""
     df = add_polygon_coords(df)
     df = df[df["polygon_coords"].notna()].copy()
@@ -188,7 +235,7 @@ def build_zone_layer(df: pd.DataFrame) -> pdk.Layer:
         get_fill_color=[0, 0, 0, 0],
         get_line_color=[220, 80, 0, 230],
         line_width_min_pixels=2,
-        pickable=True,
+        pickable=pickable,
         stroked=True,
         filled=False,
     )

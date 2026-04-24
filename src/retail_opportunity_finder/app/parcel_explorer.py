@@ -178,6 +178,8 @@ def apply_filters(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
 def apply_sort(df: pd.DataFrame, sort_key: str) -> pd.DataFrame:
     """Sorts the parcel DataFrame by the selected sort option."""
     col, ascending = _SORT_MAP.get(sort_key, ("shortlist_score", False))
+    if col not in df.columns:
+        return df.reset_index(drop=True)
     return df.sort_values(col, ascending=ascending, na_position="last").reset_index(drop=True)
 
 
@@ -246,7 +248,7 @@ def build_parcel_scatter_layer(df: pd.DataFrame) -> pdk.Layer:
     )
 
 
-def build_out_of_zone_layer(df: pd.DataFrame) -> pdk.Layer:
+def build_out_of_zone_layer(df: pd.DataFrame, pickable: bool = True) -> pdk.Layer:
     """Builds a muted ScatterplotLayer for retail parcels outside the current zone system."""
     df = df[df["centroid_lat"].notna() & df["centroid_lon"].notna()].copy()
     df["fill_color"] = df["retail_subtype"].apply(
@@ -263,7 +265,7 @@ def build_out_of_zone_layer(df: pd.DataFrame) -> pdk.Layer:
         line_width_min_pixels=0.3,
         radius_min_pixels=2,
         radius_max_pixels=6,
-        pickable=True,
+        pickable=pickable,
         auto_highlight=True,
     )
 

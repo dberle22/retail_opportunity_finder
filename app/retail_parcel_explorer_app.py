@@ -1,4 +1,4 @@
-"""Retail Parcel Explorer — Surface 2: parcel candidate browser with scoring and shortlist."""
+"""Retail Parcel Explorer — Surface 2: parcel candidate browser with scoring."""
 
 import pandas as pd
 import pydeck as pdk
@@ -6,8 +6,8 @@ import streamlit as st
 import duckdb
 
 from retail_opportunity_finder.utils.config import get_db_path, load_settings
+from retail_opportunity_finder.utils.geo import add_polygon_coords
 from retail_opportunity_finder.app.parcel_explorer import (
-    SHORTLIST_STATUSES,
     SORT_OPTIONS,
     SUBTYPE_COLORS,
     apply_filters,
@@ -19,12 +19,11 @@ from retail_opportunity_finder.app.parcel_explorer import (
     load_out_of_shortlist,
     load_shortlist,
     score_status,
-    upsert_shortlist,
 )
 from retail_opportunity_finder.app.zone_map import (
     apply_color_ramp,
     build_metric_options,
-    build_tract_layer,
+    build_tooltip,
     build_zone_layer,
     load_tract_data,
     load_zone_data,
@@ -35,17 +34,8 @@ st.set_page_config(page_title="Retail Parcel Explorer", layout="wide")
 _settings = load_settings()
 _market_key = _settings.get("default_market_key", "jacksonville_fl")
 _market = _settings["markets"][_market_key]
-_user_id = _settings.get("local_user", {}).get("default_user_id", "local_default")
 
 _MAP_STYLE = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
-
-_STATUS_DISPLAY = {
-    "active": "Active",
-    "needs_review": "Needs Review",
-    "watchlist": "Watchlist",
-    "rejected": "Rejected",
-}
-_STATUS_FILTER_OPTIONS = ["All", "Active", "Needs Review", "Watchlist", "Rejected", "Unreviewed"]
 
 
 @st.cache_resource
@@ -73,11 +63,11 @@ def _load_tracts(_con, cbsa_code: str) -> pd.DataFrame:
     return load_tract_data(_con, cbsa_code)
 
 
-def _load_user_status(con, market_key: str, user_id: str) -> pd.DataFrame:
-    return con.execute(
-        "SELECT parcel_uid, status AS user_status, notes AS user_notes "
-        "FROM rof_gold.user_shortlist WHERE market_key = ? AND user_id = ?",
-        [market_key, user_id],
+@st.cache_data
+def _load_cbsa_boundary(_con, cbsa_code: str) -> pd.DataFrame:
+    return _con.execute(
+        "SELECT cbsa_code, geom_wkt FROM rof_gold.cbsa_geometry WHERE cbsa_code = ?",
+        [cbsa_code],
     ).df()
 
 
@@ -118,16 +108,17 @@ with st.sidebar:
 
     # — View controls —
     st.markdown("**View**")
-    zone_system_label = st.radio("Zone System", ["Cluster", "Contiguity"], horizontal=True)
-    zone_system = zone_system_label.lower()
+    zone_system = "cluster"
+    st.caption("This view uses the cluster-based zone system only.")
 
-    color_by = st.radio("Color by", ["Retail Subtype", "Shortlist Score"], horizontal=True)
+    color_by = st.radio("Color by", ["Retail Subtype", "Opportunity Score"], horizontal=True)
     color_by_key = "subtype" if color_by == "Retail Subtype" else "score"
 
     show_out_of_zone = st.toggle("Show out-of-zone retail", value=False)
 
     show_tracts = st.toggle("Show tract demographics", value=False)
     tract_metric_col: str | None = None
+    hover_focus = "Parcel Details"
     if show_tracts:
         metric_options = build_metric_options()
         tract_metric_label = st.selectbox(
@@ -136,6 +127,11 @@ with st.sidebar:
             label_visibility="collapsed",
         )
         tract_metric_col = metric_options[tract_metric_label]
+        hover_focus = st.radio(
+            "Hover shows",
+            ["Parcel Details", "Tract Demographics"],
+            horizontal=True,
+        )
 
     st.divider()
 
@@ -183,44 +179,17 @@ with st.sidebar:
     )
 
     with st.expander("Score Thresholds"):
-        min_shortlist = st.slider("Min Shortlist Score", 0.0, 1.0, 0.0, 0.05)
+        min_shortlist = st.slider("Min Opportunity Score", 0.0, 1.0, 0.0, 0.05)
         min_zone_quality = st.slider("Min Zone Quality", 0.0, 1.0, 0.0, 0.05)
         min_parcel_chars = st.slider("Min Parcel Characteristics", 0.0, 1.0, 0.0, 0.05)
 
     st.divider()
-    status_filter = st.selectbox("Shortlist Status", _STATUS_FILTER_OPTIONS)
     sort_key = st.selectbox("Sort By", SORT_OPTIONS)
 
     st.divider()
 
-    # — Zone overview —
-    with st.expander("Zone Overview"):
-        display_cols = [c for c in ["zone_label", "tracts", "total_population",
-                                     "pop_growth_3yr_wtd", "mean_tract_score"]
-                        if c in zone_df.columns]
-        zone_overview = zone_df[display_cols].sort_values("mean_tract_score", ascending=False).copy()
-        zone_overview.columns = [
-            {"zone_label": "Zone", "tracts": "Tracts", "total_population": "Population",
-             "pop_growth_3yr_wtd": "Pop Growth", "mean_tract_score": "Score"}.get(c, c)
-            for c in display_cols
-        ]
-        if "Population" in zone_overview.columns:
-            zone_overview["Population"] = zone_overview["Population"].apply(
-                lambda v: f"{int(v):,}" if pd.notna(v) else "—"
-            )
-        if "Pop Growth" in zone_overview.columns:
-            zone_overview["Pop Growth"] = zone_overview["Pop Growth"].apply(
-                lambda v: f"{v:.1%}" if pd.notna(v) else "—"
-            )
-        if "Score" in zone_overview.columns:
-            zone_overview["Score"] = zone_overview["Score"].apply(
-                lambda v: f"{v:.3f}" if pd.notna(v) else "—"
-            )
-        st.dataframe(zone_overview, hide_index=True, use_container_width=True)
-        st.caption(
-            "Zones built by k-means clustering of census tracts. "
-            "Score = composite of population growth, housing activity, price headroom, and commute."
-        )
+    st.markdown("**Zone Details**")
+    st.caption("Open `app/zone_explorer_app.py` for clustering details and full zone metrics.")
 
     # — Subtype legend —
     if color_by_key == "subtype":
@@ -229,8 +198,7 @@ with st.sidebar:
 
 # ── Data loading and filtering ────────────────────────────────────────────────
 
-user_status_df = _load_user_status(con, _market_key, _user_id)
-parcel_df = base_df.merge(user_status_df, on="parcel_uid", how="left")
+parcel_df = base_df.copy()
 
 filters = {
     "counties": counties,
@@ -241,36 +209,27 @@ filters = {
     "min_shortlist_score": min_shortlist,
     "min_zone_quality_score": min_zone_quality,
     "min_parcel_chars_score": min_parcel_chars,
-    "status_filter": status_filter,
 }
 
 filtered_df = apply_sort(apply_filters(parcel_df, filters), sort_key)
 
 # ── Resolve selection ─────────────────────────────────────────────────────────
 
-if "selected_idx" not in st.session_state:
-    st.session_state["selected_idx"] = None
-
-selected_row = (
-    filtered_df.iloc[st.session_state["selected_idx"]]
-    if st.session_state["selected_idx"] is not None
-    and st.session_state["selected_idx"] < len(filtered_df)
-    else None
-)
+if "selected_parcel_uid" not in st.session_state:
+    st.session_state["selected_parcel_uid"] = None
 
 # ── Build map layers ──────────────────────────────────────────────────────────
 
 layers: list[pdk.Layer] = []
+show_tract_tooltip = show_tracts and hover_focus == "Tract Demographics"
 
-# Optional: tract choropleth (bottom layer, not pickable — tooltip is for parcels only)
 if show_tracts and tract_metric_col:
-    from retail_opportunity_finder.utils.geo import add_polygon_coords as _apc
     tract_df = _load_tracts(con, cbsa_code)
     colored_tract_df = apply_color_ramp(tract_df, tract_metric_col)
     colored_tract_df["fill_color"] = colored_tract_df["fill_color"].apply(
         lambda c: [c[0], c[1], c[2], min(c[3], 130)]
     )
-    colored_tract_df = _apc(colored_tract_df)
+    colored_tract_df = add_polygon_coords(colored_tract_df)
     colored_tract_df = colored_tract_df[colored_tract_df["polygon_coords"].notna()]
     layers.append(pdk.Layer(
         "PolygonLayer",
@@ -280,17 +239,47 @@ if show_tracts and tract_metric_col:
         get_fill_color="fill_color",
         get_line_color=[100, 100, 100, 60],
         line_width_min_pixels=0.5,
-        pickable=True,
+        pickable=show_tract_tooltip,
         opacity=1.0,
     ))
 
 if show_out_of_zone:
     oos_df = _load_out_of_shortlist(con, _market_key, zone_system)
-    layers.append(build_out_of_zone_layer(oos_df))
+    layers.append(build_out_of_zone_layer(oos_df, pickable=not show_tract_tooltip))
 
-layers.append(build_parcel_scatter_layer(filtered_df))
-layers.append(build_parcel_layer(filtered_df, color_by=color_by_key))
-layers.append(build_zone_layer(zone_df))
+parcel_scatter_layer = build_parcel_scatter_layer(filtered_df)
+parcel_scatter_layer.pickable = not show_tract_tooltip
+layers.append(parcel_scatter_layer)
+
+parcel_layer = build_parcel_layer(filtered_df, color_by=color_by_key)
+parcel_layer.pickable = not show_tract_tooltip
+layers.append(parcel_layer)
+layers.append(build_zone_layer(zone_df, pickable=False))
+
+cbsa_df = _load_cbsa_boundary(con, cbsa_code)
+cbsa_coords = add_polygon_coords(cbsa_df)
+cbsa_valid = cbsa_coords[cbsa_coords["polygon_coords"].notna()]
+if not cbsa_valid.empty:
+    layers.append(pdk.Layer(
+        "PolygonLayer",
+        cbsa_valid,
+        id="cbsa",
+        get_polygon="polygon_coords",
+        get_fill_color=[0, 0, 0, 0],
+        get_line_color=[0, 0, 0, 210],
+        line_width_min_pixels=2,
+        stroked=True,
+        filled=False,
+        pickable=False,
+    ))
+
+selected_row = None
+if st.session_state["selected_parcel_uid"] is not None:
+    selected_matches = filtered_df[filtered_df["parcel_uid"] == st.session_state["selected_parcel_uid"]]
+    if not selected_matches.empty:
+        selected_row = selected_matches.iloc[0]
+    else:
+        st.session_state["selected_parcel_uid"] = None
 
 if selected_row is not None:
     sel_layer = build_selected_layer(selected_row)
@@ -303,24 +292,22 @@ view_state = pdk.ViewState(
     zoom=_market["default_map_zoom"],
 )
 
-# Parcel fields populate when hovering parcels; tract fields populate when hovering tracts.
-# Fields absent from a given layer render blank — both sections show useful data for their layer.
 deck = pdk.Deck(
     layers=layers,
     initial_view_state=view_state,
-    tooltip={
-        "html": (
-            "<b>{site_addr}</b><br/>"
-            "<span style='opacity:0.75'>{retail_subtype} &bull; {county_name}</span><br/>"
-            "Zone: {zone_label} &nbsp; Score: {shortlist_score}"
-            "<hr style='margin:4px 0;border-color:#ddd'/>"
-            "<small style='opacity:0.7'>Tract {tract_geoid}</small><br/>"
-            "Pop: {pop_total} &nbsp; Growth: {pop_growth_3yr}<br/>"
-            "Income: {median_hh_income} &nbsp; Tract Score: {tract_score}"
-        ),
-        "style": {"backgroundColor": "white", "color": "#333",
-                  "padding": "8px", "maxWidth": "220px"},
-    },
+    tooltip=(
+        build_tooltip("tract")
+        if show_tract_tooltip
+        else {
+            "html": (
+                "<b>{site_addr}</b><br/>"
+                "<span style='opacity:0.75'>{retail_subtype} &bull; {county_name}</span><br/>"
+                "Zone: {zone_label} &nbsp; Opportunity Score: {shortlist_score}"
+            ),
+            "style": {"backgroundColor": "white", "color": "#333",
+                      "padding": "8px", "maxWidth": "220px"},
+        }
+    ),
     map_style=_MAP_STYLE,
 )
 
@@ -338,6 +325,10 @@ else:
 if selected_row is not None:
     with col_detail:
         r = selected_row
+
+        if st.button("Clear Selection", use_container_width=True):
+            st.session_state["selected_parcel_uid"] = None
+            st.rerun()
 
         st.markdown("#### Identity")
         st.markdown(f"**Address:** {r.get('site_addr') or '—'}")
@@ -371,7 +362,7 @@ if selected_row is not None:
 
         st.markdown("#### Scores")
         for label, val in [
-            ("Shortlist Score", r.get("shortlist_score")),
+            ("Opportunity Score", r.get("shortlist_score")),
             ("Zone Quality", r.get("zone_quality_score")),
             ("Parcel Characteristics", r.get("parcel_characteristics_score")),
             ("Local Retail Context", r.get("local_retail_context_score")),
@@ -392,22 +383,7 @@ if selected_row is not None:
 
         st.divider()
 
-        st.markdown("#### Shortlist")
-        current_status = r.get("user_status")
-        current_notes = r.get("user_notes") or ""
-
-        with st.form(key=f"shortlist_{r['parcel_uid']}"):
-            default_idx = SHORTLIST_STATUSES.index(current_status) if current_status in SHORTLIST_STATUSES else 0
-            new_status = st.selectbox(
-                "Status",
-                options=SHORTLIST_STATUSES,
-                index=default_idx,
-                format_func=lambda s: _STATUS_DISPLAY.get(s, s),
-            )
-            new_notes = st.text_area("Notes", value=current_notes, height=80)
-            if st.form_submit_button("Save", use_container_width=True):
-                upsert_shortlist(con, r["parcel_uid"], _market_key, _user_id, new_status, new_notes)
-                st.success("Saved.")
+        st.info("Zone-level methodology and full zone metrics live in the Zone Explorer.")
 
 # ── Bottom: parcel list ───────────────────────────────────────────────────────
 
@@ -431,6 +407,7 @@ event = st.dataframe(
     height=320,
     on_select="rerun",
     selection_mode="single-row",
+    key="parcel_table",
     column_config={
         "#": st.column_config.NumberColumn(width="small"),
         "Score": st.column_config.TextColumn(width="small"),
@@ -438,8 +415,9 @@ event = st.dataframe(
     },
 )
 
-# Persist selection in session_state so detail panel updates correctly
+# Persist selection by parcel_uid so detail panel updates immediately and survives sorting/filtering
 if event.selection.rows:
-    st.session_state["selected_idx"] = event.selection.rows[0]
-else:
-    st.session_state["selected_idx"] = None
+    selected_uid = filtered_df.iloc[event.selection.rows[0]]["parcel_uid"]
+    if st.session_state["selected_parcel_uid"] != selected_uid:
+        st.session_state["selected_parcel_uid"] = selected_uid
+        st.rerun()

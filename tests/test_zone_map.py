@@ -119,8 +119,8 @@ class TestApplyColorRamp:
         # Index 1 (0.30 = high pov, inverted = low rank) should be lighter
         color_low_pov = result["fill_color"].iloc[0]
         color_high_pov = result["fill_color"].iloc[1]
-        # Blue channel: high rank → closer to HI_COLOR blue=107
-        assert color_low_pov[2] > color_high_pov[2]
+        # Red channel: high rank → closer to HI_COLOR red=8, low rank → LO_COLOR red=239
+        assert color_low_pov[0] < color_high_pov[0]
 
     def test_does_not_mutate_input(self):
         df = _make_tract_df()
