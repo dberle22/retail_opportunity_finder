@@ -40,7 +40,7 @@ if (length(script_flag) > 0) {
   repo_root <- getwd()
 }
 
-rds_root     <- "/Users/danberle/Documents/projects/data/property_taxes/parcel_geom/fl"
+rds_root     <- file.path(repo_root, "..", "data", "property_taxes", "parcel_geom", "fl")
 out_dir      <- file.path(repo_root, "data", "processed", "parcel_geom")
 key_csv_path <- file.path(out_dir, "retail_join_keys.csv")
 
